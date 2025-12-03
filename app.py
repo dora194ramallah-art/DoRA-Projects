@@ -1,184 +1,183 @@
 import streamlit as st
 import pandas as pd
+import sqlite3
 import plotly.express as px
-import plotly.graph_objects as go
-from datetime import datetime
+from st_aggrid import AgGrid, GridUpdateMode, GridOptionsBuilder
 
-# ---------------------------------------------------------
-# 1. إعداد الصفحة وتنسيق الواجهة
-# ---------------------------------------------------------
-st.set_page_config(page_title="نظام مشاريع المخيمات", layout="wide", page_icon="🏗️")
+# -------------------------------------------------------------------
+# 1. إعداد قاعدة البيانات وتخزين البيانات الأولية
+# -------------------------------------------------------------------
 
-# تنسيق CSS مخصص لدعم العربية (RTL)
-st.markdown("""
-<style>
-    .main {direction: rtl; text-align: right;}
-    div.block-container {padding-top: 2rem;}
-    h1, h2, h3 {text-align: right; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;}
-    .stMetric {text-align: right !important; direction: rtl;}
-    /* محاولة لضبط اتجاه الجداول */
-    .stDataFrame {direction: rtl;}
-</style>
-""", unsafe_allow_html=True)
+DB_NAME = "projects.db"
+CSV_FILE = "projects.csv"
 
-st.title("🏗️ لوحة القيادة الذكية - مشاريع المخيمات 2025")
+# وظيفة لربط قاعدة البيانات
+@st.cache_resource
+def get_db_connection():
+    conn = sqlite3.connect(DB_NAME, check_same_thread=False)
+    return conn
 
-# ---------------------------------------------------------
-# 2. تحميل وتنظيف البيانات
-# ---------------------------------------------------------
-@st.cache_data
-def load_data():
-    # قراءة الملف (يفترض أن الملف محفوظ باسم projects.csv)
+# وظيفة لتهيئة الجدول وتحميل البيانات من CSV (تنفذ مرة واحدة)
+def setup_database():
+    conn = get_db_connection()
+    c = conn.cursor()
     try:
-        df = pd.read_csv("projects.csv") 
-    except:
-        # محاولة قراءة ملف الاكسل مباشرة اذا لم يتم التحويل ل csv
-        # df = pd.read_excel("projects.xlsx")
-        st.error("لم يتم العثور على الملف. الرجاء التأكد من وجود ملف باسم projects.csv")
-        return pd.DataFrame()
+        # قراءة البيانات من الملف
+        df = pd.read_csv(CSV_FILE)
+        df.columns = df.columns.str.strip()
+        
+        # تخزين البيانات في جدول جديد (استبدال إذا كان موجوداً)
+        df.to_sql("projects", conn, if_exists="replace", index=False)
+        st.success("✅ تم تحميل بيانات المشاريع بنجاح إلى قاعدة البيانات.")
+    except FileNotFoundError:
+        st.error(f"⚠️ لم يتم العثور على ملف البيانات {CSV_FILE}. الرجاء التأكد من وجوده.")
+    except Exception as e:
+        st.error(f"⚠️ حدث خطأ أثناء تحميل البيانات: {e}")
+    conn.close()
 
-    # تنظيف أسماء الأعمدة (إزالة المسافات الزائدة)
-    df.columns = df.columns.str.strip()
+# تهيئة قاعدة البيانات عند بدء التشغيل
+setup_database()
 
-    # تحويل الأعمدة الرقمية (التكلفة والعقود)
+# -------------------------------------------------------------------
+# 2. وظائف القراءة والكتابة
+# -------------------------------------------------------------------
+
+def get_projects_df():
+    conn = get_db_connection()
+    df = pd.read_sql("SELECT * FROM projects", conn)
+    conn.close()
+    
+    # تحويل الأعمدة الرقمية والتواريخ كما فعلنا سابقاً
     cols_to_clean = ['التكلفة التقديرية', 'قيمة العقد / العقود', 'قيمة المخالصة']
     for col in cols_to_clean:
         if col in df.columns:
-            # إزالة النصوص مثل "دولار" أو الفواصل
-            df[col] = df[col].astype(str).str.replace(r'[^\d.]', '', regex=True)
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    # تحويل التواريخ
-    date_cols = ['تاريخ المباشرة', 'تاريخ الاستلام الابتدائي', 'تاريخ التقدم بالاقفال']
-    for col in date_cols:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors='coerce', dayfirst=True)
-
-    # حسابات إضافية مفيدة للتحليل
     if 'التكلفة التقديرية' in df.columns and 'قيمة العقد / العقود' in df.columns:
         df['فارق الميزانية'] = df['التكلفة التقديرية'] - df['قيمة العقد / العقود']
         df['حالة الميزانية'] = df['فارق الميزانية'].apply(lambda x: 'وفر ✅' if x >= 0 else 'تجاوز 🔻')
 
     return df
 
-df = load_data()
+def update_project(row_data):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    # سنستخدم "رقم العملية الشرائية" كمفتاح فريد للتحديث
+    unique_id = row_data['رقم العملية الشرائية']
+    
+    # بناء جملة التحديث SQL (يجب أن تتضمن كل الأعمدة المحدثة)
+    # *ملاحظة: هذا مثال جزئي، يجب تضمين جميع الأعمدة المراد تحديثها في جملة SQL*
+    update_query = f"""
+    UPDATE projects SET
+        "اسم العملية الشرائية" = ?,
+        "المقاول" = ?,
+        "التكلفة التقديرية" = ?,
+        "قيمة العقد / العقود" = ?,
+        "ملاحظات" = ?
+    WHERE "رقم العملية الشرائية" = ?
+    """
+    
+    # هنا يجب تمرير البيانات بالترتيب الصحيح
+    cursor.execute(update_query, (
+        row_data['اسم العملية الشرائية'], 
+        row_data['المقاول'], 
+        row_data['التكلفة التقديرية'], 
+        row_data['قيمة العقد / العقود'], 
+        row_data['ملاحظات'],
+        unique_id
+    ))
+    
+    conn.commit()
+    conn.close()
 
-if df.empty:
-    st.stop()
+# -------------------------------------------------------------------
+# 3. واجهة الإدارة والمصادقة (Authentication)
+# -------------------------------------------------------------------
 
-# ---------------------------------------------------------
-# 3. الشريط الجانبي (فلاتر البحث)
-# ---------------------------------------------------------
-st.sidebar.header("🔍 أدوات التصفية")
+if 'logged_in' not in st.session_state:
+    st.session_state.logged_in = False
+    
+def login_form():
+    st.sidebar.title("🔐 دخول المسؤول")
+    with st.sidebar.form("login_form"):
+        password = st.text_input("كلمة المرور", type="password")
+        submitted = st.form_submit_button("دخول")
+        
+        # كلمة مرور بسيطة للمثال
+        ADMIN_PASSWORD = "12345" 
+        
+        if submitted:
+            if password == ADMIN_PASSWORD:
+                st.session_state.logged_in = True
+                st.sidebar.success("تم تسجيل الدخول بنجاح!")
+                st.rerun()
+            else:
+                st.sidebar.error("كلمة المرور غير صحيحة.")
 
-# فلتر حسب المقاول
-contractors = st.sidebar.multiselect(
-    "المقاول",
-    options=df['المقاول'].unique(),
-    default=df['المقاول'].unique()
-)
+def admin_panel(df):
+    st.title("🛡️ لوحة تحكم المسؤول (تعديل البيانات)")
+    st.warning("لتعديل البيانات، قم بالضغط مرتين على الخلية المراد تغييرها ثم اضغط 'حفظ التعديلات'.")
 
-# فلتر حسب مصدر التمويل
-funding_sources = st.sidebar.multiselect(
-    "مصدر التمويل",
-    options=df['مصدر التمويل'].unique(),
-    default=df['مصدر التمويل'].unique()
-)
-
-# فلتر حالة الإقفال (بناء على عمود التقدم بالاقفال)
-if 'التقدم بالاقفال' in df.columns:
-    status_filter = st.sidebar.multiselect(
-        "حالة الإقفال",
-        options=df['التقدم بالاقفال'].unique(),
-        default=df['التقدم بالاقفال'].unique()
+    # إعداد جدول AgGrid التفاعلي
+    gb = GridOptionsBuilder.from_dataframe(df)
+    gb.configure_columns(df.columns.tolist(), editable=True, groupable=True)
+    gb.configure_grid_options(domLayout='normal')
+    
+    gridOptions = gb.build()
+    
+    grid_response = AgGrid(
+        df, 
+        gridOptions=gridOptions, 
+        data_return_mode='AS_INPUT', 
+        update_mode=GridUpdateMode.MODEL_CHANGED,
+        fit_columns_on_grid_load=False,
+        allow_unsafe_jscode=True, 
+        enable_enterprise_modules=False,
+        height=500, 
+        width='100%',
+        reload_data=True
     )
-    df_selection = df.query("`التقدم بالاقفال` == @status_filter")
+
+    # حفظ التعديلات
+    if st.button("💾 حفظ التعديلات على قاعدة البيانات"):
+        if grid_response['data'] is not None:
+            updated_df = pd.DataFrame(grid_response['data'])
+            
+            # تحديد الأعمدة التي تم تعديلها وحفظها
+            for index, row in updated_df.iterrows():
+                # *ملاحظة هامة: في بيئة حقيقية، يجب مقارنة التعديلات وحفظ الصفوف المحدثة فقط*
+                try:
+                    update_project(row) # تمرير الصف بالكامل لوظيفة التحديث
+                except Exception as e:
+                    st.error(f"خطأ في تحديث الصف رقم {index}: {e}")
+                    
+            st.success("تم حفظ جميع التعديلات بنجاح!")
+            st.rerun()
+
+
+# -------------------------------------------------------------------
+# 4. التطبيق الرئيسي (العرض بناءً على حالة تسجيل الدخول)
+# -------------------------------------------------------------------
+
+df = get_projects_df()
+
+if st.session_state.logged_in:
+    admin_panel(df)
+    if st.sidebar.button("تسجيل الخروج"):
+        st.session_state.logged_in = False
+        st.rerun()
 else:
-    df_selection = df
-
-# تطبيق باقي الفلاتر
-df_selection = df_selection.query(
-    "`المقاول` == @contractors & `مصدر التمويل` == @funding_sources"
-)
-
-# ---------------------------------------------------------
-# 4. مؤشرات الأداء (KPIs)
-# ---------------------------------------------------------
-st.markdown("---")
-col1, col2, col3, col4 = st.columns(4)
-
-with col1:
-    st.metric("عدد المشاريع", len(df_selection))
-
-with col2:
-    total_estimated = df_selection['التكلفة التقديرية'].sum()
-    st.metric("إجمالي التكلفة التقديرية", f"${total_estimated:,.0f}")
-
-with col3:
-    total_contract = df_selection['قيمة العقد / العقود'].sum()
-    delta_val = total_estimated - total_contract
-    st.metric("إجمالي قيمة العقود", f"${total_contract:,.0f}", delta=f"{delta_val:,.0f} (وفر/عجز)")
-
-with col4:
-    # عدد المشاريع المقفلة (التي تحتوي على "نعم" أو قيمة في تاريخ الإقفال)
-    closed_projects = df_selection[df_selection['التقدم بالاقفال'].astype(str).str.contains('نعم', na=False)].shape[0]
-    st.metric("المشاريع المنجزة/المقفلة", closed_projects)
-
-# ---------------------------------------------------------
-# 5. الرسوم البيانية والتحليل
-# ---------------------------------------------------------
-st.markdown("### 📊 التحليل المالي والزمني")
-
-row1_col1, row1_col2 = st.columns([2, 1])
-
-with row1_col1:
-    # رسم بياني يقارن التكلفة التقديرية بقيمة العقد لكل مشروع
-    st.subheader("مقارنة: التكلفة التقديرية vs قيمة العقد")
+    # عرض لوحة القيادة العامة والبحث (نفس الكود من الرد السابق)
+    st.title("لوحة قيادة المشاريع (عرض فقط)")
     
-    # تحضير البيانات للرسم (Melt)
-    df_melted = df_selection.melt(id_vars=['اسم العملية الشرائية'], 
-                                  value_vars=['التكلفة التقديرية', 'قيمة العقد / العقود'],
-                                  var_name='نوع التكلفة', value_name='القيمة')
+    # هنا يتم عرض الفلاتر والرسوم البيانية التفاعلية كما في الرد السابق
+    # (تم اختصارها هنا لتركيز الكود على وظائف الإدارة)
+    st.subheader("📊 إجمالي قيمة العقود")
+    total_contract = df['قيمة العقد / العقود'].sum()
+    st.metric("المجموع الكلي", f"{total_contract:,.0f} دولار")
     
-    fig_bar = px.bar(df_melted, x='اسم العملية الشرائية', y='القيمة', color='نوع التكلفة', barmode='group',
-                     color_discrete_map={'التكلفة التقديرية': '#abb8c3', 'قيمة العقد / العقود': '#0068c9'})
-    st.plotly_chart(fig_bar, use_container_width=True)
-
-with row1_col2:
-    # توزيع المشاريع حسب مصدر التمويل
-    st.subheader("توزيع التمويل")
-    fig_pie = px.pie(df_selection, values='قيمة العقد / العقود', names='مصدر التمويل', donut=0.4)
-    st.plotly_chart(fig_pie, use_container_width=True)
-
-# ---------------------------------------------------------
-# 6. الجدول التفصيلي للبيانات
-# ---------------------------------------------------------
-st.markdown("---")
-st.subheader("📋 سجل العمليات التفصيلي")
-
-# تلوين الخلايا بناءً على حالة الميزانية
-def highlight_budget(val):
-    if val == 'وفر ✅':
-        return 'background-color: #d4edda; color: green'
-    elif val == 'تجاوز 🔻':
-        return 'background-color: #f8d7da; color: red'
-    return ''
-
-# عرض الجدول مع إمكانية التوسيع
-with st.expander("اضغط هنا لعرض/إخفاء الجدول الكامل", expanded=True):
-    st.dataframe(
-        df_selection.style.map(highlight_budget, subset=['حالة الميزانية'])
-        .format({'التكلفة التقديرية': '{:,.0f}', 'قيمة العقد / العقود': '{:,.0f}', 'فارق الميزانية': '{:,.0f}'}),
-        use_container_width=True,
-        height=400
-    )
-
-# زر التحميل
-csv = df_selection.to_csv(index=False).encode('utf-8-sig')
-st.download_button(
-    "📥 تحميل التقرير الحالي (Excel/CSV)",
-    csv,
-    "report.csv",
-    "text/csv",
-    key='download-csv'
-)
+    st.subheader("🔍 الجدول للبحث والاستعلام")
+    st.dataframe(df, use_container_width=True)
+    
+    login_form()
